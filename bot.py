@@ -14,9 +14,6 @@ from telegram.ext import (
 # Dictionary to track active monitoring jobs
 active_monitors = {}
 
-# Whitelist of allowed IPs for scanning (modify as needed)
-ALLOWED_IPS = ["8.8.8.8", "1.1.1.1", "example.com"]  # Add your allowed IPs/Domains
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message with instructions"""
     await update.message.reply_text(
@@ -24,7 +21,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/monitor <IP> <PORT> <MINUTES> - Check port status\n"
         "/stop - Cancel monitoring\n\n"
-        "Note: Only whitelisted IPs can be scanned"
+        "Note: Maximum monitoring duration is 60 minutes"
     )
 
 async def monitor_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -34,11 +31,6 @@ async def monitor_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     ip, port, minutes = context.args[0], context.args[1], context.args[2]
-
-    # Validate IP against whitelist
-    if ip not in ALLOWED_IPS:
-        await update.message.reply_text("❌ This IP is not whitelisted for scanning")
-        return
 
     # Validate port input
     try:
@@ -75,7 +67,7 @@ async def monitor_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async def check_port_job(context: ContextTypes.DEFAULT_TYPE):
         """Job that runs periodically to check port status"""
         try:
-            # Method 1: Try direct socket connection (works on paid Render plans)
+            # Method 1: Try direct socket connection
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(3)
