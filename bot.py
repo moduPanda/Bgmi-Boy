@@ -7,8 +7,8 @@ from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
-    CallbackContext,
-    JobQueue
+    JobQueue,
+    ApplicationBuilder
 )
 
 # Dictionary to track active monitoring jobs
@@ -48,7 +48,7 @@ async def monitor_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if minutes < 1:
             await update.message.reply_text("Time must be at least 1 minute.")
             return
-        if minutes > 60:  # Limit to 1 hour max
+        if minutes > 60:
             await update.message.reply_text("Maximum monitoring time is 60 minutes.")
             return
     except ValueError:
@@ -67,7 +67,7 @@ async def monitor_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async def check_port_job(context: ContextTypes.DEFAULT_TYPE):
         """Job that runs periodically to check port status"""
         try:
-            # Method 1: Try direct socket connection
+            # Try direct socket connection
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(3)
@@ -77,7 +77,7 @@ async def monitor_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         status = f"closed ❌ (error {result})"
             except:
-                # Method 2: Fallback to external service if socket fails
+                # Fallback to external service
                 try:
                     response = requests.get(
                         f"https://api.hackertarget.com/nmap/?q={ip}:{port}",
@@ -92,19 +92,14 @@ async def monitor_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"Port {port} on {ip}:\n"
-                     f"Status: {status}\n"
-                     f"Time: {datetime.now().strftime('%H:%M:%S')}"
+                text=f"Port {port} on {ip}:\nStatus: {status}\nTime: {datetime.now().strftime('%H:%M:%S')}"
             )
         except Exception as e:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"⚠️ Error checking port: {str(e)}"
-            )
+            print(f"Error in check_port_job: {e}")
 
     job = context.job_queue.run_repeating(
         check_port_job,
-        interval=30,  # Check every 30 seconds to avoid rate limits
+        interval=30,
         first=0,
         last=end_time.timestamp(),
         chat_id=chat_id,
@@ -128,23 +123,53 @@ async def stop_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("⚠️ No active monitoring to stop.")
 
+async def post_init(application: Application):
+    """Ensure only one instance runs"""
+    await application.bot.delete_webhook(drop_pending_updates=True)
+    print("Bot initialized - single instance enforced")
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors"""
+    print(f"Error occurred: {context.error}")
+    if update and hasattr(update, 'message'):
+        await update.message.reply_text("⚠️ An error occurred. Please try again.")
+
 def main():
-    # Get token from environment variable
+    # Get token from environment
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise ValueError("No BOT_TOKEN environment variable set")
 
-    # Create application
-    application = Application.builder().token(token).build()
+    # Build application with proper configuration
+    application = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(post_init)
+        .concurrent_updates(False)  # Disable concurrent updates
+        .build()
+    )
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("monitor", monitor_port))
     application.add_handler(CommandHandler("stop", stop_monitor))
+    
+    # Add error handler
+    application.add_error_handler(error_handler)
 
-    # Start the bot
-    print("Bot is running...")
-    application.run_polling()
+    # Run the bot
+    print("Bot is running (single instance enforced)...")
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        close_loop=False,
+        stop_signals=None
+    )
 
 if __name__ == "__main__":
-    main()
+    # Ensure only one instance runs
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Bot stopped by user")
+    except Exception as e:
+        print(f"Fatal error: {e}")
