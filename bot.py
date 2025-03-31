@@ -1,101 +1,158 @@
+import os
 import socket
+import requests
 from datetime import datetime, timedelta
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext, JobQueue
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    CallbackContext,
+    JobQueue
+)
 
-# Dictionary to track active monitoring jobs for each user
+# Dictionary to track active monitoring jobs
 active_monitors = {}
 
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text(
+# Whitelist of allowed IPs for scanning (modify as needed)
+ALLOWED_IPS = ["8.8.8.8", "1.1.1.1", "example.com"]  # Add your allowed IPs/Domains
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message with instructions"""
+    await update.message.reply_text(
+        "🔍 Port Monitor Bot\n\n"
         "Commands:\n"
-        "/monitor <IP> <PORT> <MINUTES> - Monitor a port for X minutes\n"
-        "/stop - Stop monitoring"
+        "/monitor <IP> <PORT> <MINUTES> - Check port status\n"
+        "/stop - Cancel monitoring\n\n"
+        "Note: Only whitelisted IPs can be scanned"
     )
 
-def monitor_port(update: Update, context: CallbackContext):
+async def monitor_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start monitoring a specific port"""
     if len(context.args) != 3:
-        update.message.reply_text("Usage: /monitor <IP> <PORT> <MINUTES>")
+        await update.message.reply_text("Usage: /monitor <IP> <PORT> <MINUTES>")
         return
 
     ip, port, minutes = context.args[0], context.args[1], context.args[2]
 
-    # Validate input
+    # Validate IP against whitelist
+    if ip not in ALLOWED_IPS:
+        await update.message.reply_text("❌ This IP is not whitelisted for scanning")
+        return
+
+    # Validate port input
     try:
         port = int(port)
         if not (1 <= port <= 65535):
-            update.message.reply_text("Port must be between 1-65535.")
+            await update.message.reply_text("Port must be between 1-65535.")
             return
     except ValueError:
-        update.message.reply_text("Port must be a number.")
+        await update.message.reply_text("Port must be a number.")
         return
 
+    # Validate time input
     try:
         minutes = int(minutes)
         if minutes < 1:
-            update.message.reply_text("Time must be at least 1 minute.")
+            await update.message.reply_text("Time must be at least 1 minute.")
+            return
+        if minutes > 60:  # Limit to 1 hour max
+            await update.message.reply_text("Maximum monitoring time is 60 minutes.")
             return
     except ValueError:
-        update.message.reply_text("Time must be a number.")
+        await update.message.reply_text("Time must be a number.")
         return
 
-    # Schedule the monitoring job
+    # Schedule monitoring
     chat_id = update.message.chat_id
-    job_name = f"{chat_id}_monitor"
     end_time = datetime.now() + timedelta(minutes=minutes)
 
-    # Remove existing job if it exists
+    # Remove existing job if exists
     if chat_id in active_monitors:
         active_monitors[chat_id].schedule_removal()
         del active_monitors[chat_id]
 
-    # Define the job to run every 10 seconds until end_time
-    def check_port_job(context: CallbackContext):
+    async def check_port_job(context: ContextTypes.DEFAULT_TYPE):
+        """Job that runs periodically to check port status"""
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(5)
-                result = s.connect_ex((ip, port))
-                status = "open ✅" if result == 0 else "closed ❌"
-                context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"Port {port} on {ip} is {status} at {datetime.now().strftime('%H:%M:%S')}"
-                )
-        except Exception as e:
-            context.bot.send_message(chat_id=chat_id, text=f"Error: {str(e)}")
+            # Method 1: Try direct socket connection (works on paid Render plans)
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(3)
+                    result = s.connect_ex((ip, port))
+                    if result == 0:
+                        status = "open ✅"
+                    else:
+                        status = f"closed ❌ (error {result})"
+            except:
+                # Method 2: Fallback to external service if socket fails
+                try:
+                    response = requests.get(
+                        f"https://api.hackertarget.com/nmap/?q={ip}:{port}",
+                        timeout=5
+                    )
+                    if "open" in response.text.lower():
+                        status = "open ✅ (via proxy)"
+                    else:
+                        status = "closed ❌ (via proxy)"
+                except:
+                    status = "status unknown (scan failed)"
 
-    # Schedule the job
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"Port {port} on {ip}:\n"
+                     f"Status: {status}\n"
+                     f"Time: {datetime.now().strftime('%H:%M:%S')}"
+            )
+        except Exception as e:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ Error checking port: {str(e)}"
+            )
+
     job = context.job_queue.run_repeating(
         check_port_job,
-        interval=10,  # Check every 10 seconds
+        interval=30,  # Check every 30 seconds to avoid rate limits
         first=0,
-        last=end_time,
-        name=job_name,
+        last=end_time.timestamp(),
+        chat_id=chat_id,
+        name=f"monitor_{chat_id}"
     )
 
     active_monitors[chat_id] = job
-    update.message.reply_text(
-        f"Monitoring port {port} on {ip} for {minutes} minutes. Use /stop to end early."
+    await update.message.reply_text(
+        f"🔍 Monitoring port {port} on {ip} for {minutes} minutes\n"
+        f"Next check in 30 seconds\n"
+        "Use /stop to cancel early."
     )
 
-def stop_monitor(update: Update, context: CallbackContext):
+async def stop_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop active monitoring"""
     chat_id = update.message.chat_id
     if chat_id in active_monitors:
         active_monitors[chat_id].schedule_removal()
         del active_monitors[chat_id]
-        update.message.reply_text("Monitoring stopped.")
+        await update.message.reply_text("🛑 Monitoring stopped.")
     else:
-        update.message.reply_text("No active monitor to stop.")
+        await update.message.reply_text("⚠️ No active monitoring to stop.")
 
 def main():
-    updater = Updater("7162766052:AAEd0eVt61bezP2Ld95GK9atteWppolKJGw")
-    dispatcher = updater.dispatcher
+    # Get token from environment variable
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise ValueError("No BOT_TOKEN environment variable set")
 
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("monitor", monitor_port))
-    dispatcher.add_handler(CommandHandler("stop", stop_monitor))
+    # Create application
+    application = Application.builder().token(token).build()
 
-    updater.start_polling()
-    updater.idle()
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("monitor", monitor_port))
+    application.add_handler(CommandHandler("stop", stop_monitor))
+
+    # Start the bot
+    print("Bot is running...")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
