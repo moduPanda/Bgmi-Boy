@@ -1,0 +1,12 @@
+services:
+  - name: telegram-bot
+    type: web
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "bash start.sh"
+    envVars:
+      - key: BOT_TOKEN
+        sync: true
+      - key: ADMIN_IDS
+        sync: true
